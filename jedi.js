@@ -163,7 +163,7 @@
     }*/
 
     /* example usage:
-    $.ed('click dblclick', function (fn) {
+    $.jedi('click dblclick', function (fn) {
         return function () {
             try {
                 return fn.apply(this, arguments);
