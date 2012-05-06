@@ -11,7 +11,6 @@ Example decorator:
 $.jedi('click dblclick', function (fn) {
     // this decorator catches all js exceptions and
     // prints them to the console
-
     // fn - the original event handler
     return function () {
         try {
