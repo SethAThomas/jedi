@@ -7,6 +7,7 @@ $.jedi('click', decoratorFn);
 
 Example decorator:
 
+<pre><code>
 $.jedi('click dblclick', function (fn) {
     // this decorator catches all js exceptions and
     // prints them to the console
@@ -23,4 +24,4 @@ $.jedi('click dblclick', function (fn) {
         }
     };
 });
-
+</pre></code>
