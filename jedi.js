@@ -2,55 +2,45 @@
     'use strict';
 
     var NAME = 'js-jedi';
-    var namespaceRx = /\..*/;
     var decorators = {};
-    var originals = {
-        bind: $.fn.bind,
-        unbind: $.fn.unbind,
-        delegate: $.fn.delegate,
-        undelegate: $.fn.undelegate
+
+    function EventType(eventType, type, namespaces, selector) {
+        this.eventType = eventType;
+        this.type = type;
+        this.namespaces = namespaces;
+        this.selector = selector;
+    }
+
+    EventType.get = function (eventType, selector) {
+        var pieces = eventType.split('.');
+
+        return new EventType(eventType, pieces[0], pieces.slice(1), selector);
     };
-    if ($.fn.live) {
-        originals.live = $.fn.live;
-        originals.die = $.fn.die;
-    }
-    if ($.fn.on) {
-        originals.on = $.fn.on;
-        originals.off = $.fn.off;
-    }
 
-    function getEventTypes(s) {
-        // returns a list of event types from a space delimited string
-        return $.trim(s).replace(/\s+/, ' ').split(' ');
-    }
+    EventType.gets = function (s, selector) {
+        // returns a list of EventType objects
 
-    function getBasicEventType(eventType) {
-        // returns the basic event type; removes event namespaces
-        return eventType.replace(namespaceRx, '');
-    }
+        // clean up the whitespace
+        s = $.trim(s).replace(/\s+/, ' ');
 
-    function expandEventType(s) {
-        // splits an event type into it's components
-        var pieces = s.split('.');
-        return {
-            type: pieces[0],
-            namespaces: pieces.slice(1)
-        };
-    }
+        return $.map(s.split(' '), function (v) {
+            return EventType.get(v, selector);
+        });
+    };
 
-    function isEventTypeMatch(src, target) {
-        // compare two expanded event type objects and return true if
-        // src corresponds to target using the following rules:
+    EventType.isHit = function (src, target) {
+        // does src "hit" target
         //
-        // if no namespace, then type must match
-        // if a namespace and no type, then a namespace must match
-        // if a namespace and type, then type and namespace must match
-
-        if ($.type(src) === 'string') {
-            src = expandEventType(src);
-        }
+        // "hit" determined by type, selector and namespace
+        // comparisions
 
         if (src.type && src.type !== target.type) {
+            // ex: 'change' !== 'click'
+            return false;
+        }
+
+        if (src.selector && src.selector !== target.selector) {
+            // ex: 'a, span' !== 'span'
             return false;
         }
 
@@ -58,91 +48,74 @@
             return true;
         }
 
+        // just need one namespace intersection
         for (var i = 0, len = src.namespaces.length; i < len; ++i) {
             if ($.inArray(src.namespaces[i], target.namespaces) !== -1) {
                 return true;
             }
         }
+
         return false;
-    }
-/*
-    $('.foo').
-        delegate('li', 'click', fn).
-        delegate('span', 'click', fn2).
-        delegate('div', 'click', fn3);
+    };
 
-    .... time passes .....
+    EventType.prototype.isHit = function (target) {
+        return EventType.isHit(this, target);
+    };
 
-    $('.foo').delegate('a', 'click', fn4);
+    function storeDecoratorLookup($elems, evtType, origFn, decorFn) {
+        // create a lookup between the original function and the decorated
+        // function; this is necessary to facilitate event handler removal
+        // using a function reference; a decorated function won't match
+        // the original function, so we need to enable a way to get the
+        // decorated function from the original function
 
-    $('.foo').data('js-jedi-delegate', {
-        'click': {
-            type: 'click',
-            namespaces: [],
-            handlers: [
-                {original: fn4, decorated: dfn4, selector: 'a'},
-                {original: fn, decorated: dfn, selector: 'li'},
-                {original: fn2, decorated: dfn2, selector: 'span'},
-                {original: fn3, decorated: dfn3, selector: 'div'}
-            ]
-        }
-    });
-    
-    $('.foo').undelegate('li', 'click', fn);
-*/
-
-
-
-    function setData($elems, type, selector, origFn, decorFn) {
         if (origFn === decorFn) {
             // nothing changed, so no need to worry about
             // storing a orig / decor lookup
             return;
         }
 
-        var expanded = expandEventType(type);
         var key = NAME;
 
         $elems.each(function () {
-            // {
-            //     'click.a': {
-            //         type: 'click',
-            //         namespaces: ['a'],
-            //         handlers: [
-            //             {original: fn1, decorated: fn2, selector: 'div li'}, // .delegates use selectors
-            //             {original: fn3, decorated: fn4},
-            //             ...
-            //         ]
-            //     },
-            //     'click': {
-            //         ...
-            //     },
-            //     ...
-            // }
-
-            var $el = $(this);
-            var boundData = $el.data(key) || {};
-            var eventData = boundData[type] || {};
-            var handlers = eventData.handlers || [];
             var o = {
+                eventType: evtType.eventType,
+                namespaces: evtType.namespaces,
+                type: evtType.type,
+                selector: evtType.selector,
                 original: origFn,
                 decorated: decorFn
             };
-
-            if (selector) {
-                o.selector = selector;
-            }
-
-            $.extend(eventData, expanded);
-
-            handlers[handlers.length] = o;
-            eventData.handlers = handlers;
-            boundData[type] = eventData;
-            $el.data(key, boundData);
+            var $el = $(this);
+            var data = $el.data(key) || [];
+            data[data.length] = o;
+            $el.data(key, data);
         });
     }
 
-    function decorate(eventType, fn) {
+    function removeHandler($el, evtType, handler, remover) {
+        var data = $el.data(NAME);
+
+        $.each(data, function (_, o) {
+            if (evtType.isHit(o)) {
+                if (handler === o.original) {
+                    if (evtType.selector) {
+                        remover.call($el, evtType.selector, evtType.eventType, o.decorated);
+                    } else {
+                        remover.call($el, evtType.eventType, o.decorated);
+                    }
+                }
+            }
+        });
+
+        if (evtType.selector) {
+            remover.call($el, evtType.selector, evtType.eventType, handler);
+        } else {
+            remover.call($el, evtType.eventType, handler);
+        }
+    }
+
+    function decorate(type, fn) {
         // wrap the fn with all of the decorators for this type
         // FILO wrapping - oldest decorator is the outer most wrapper
         // { decorator: 0
@@ -151,7 +124,7 @@
         //             { decorator: N - 1
         //                 actual_function();
 
-        var decors = decorators[eventType] || [],
+        var decors = decorators[type] || [],
             len = decors.length,
             out = fn;
 
@@ -162,33 +135,77 @@
         return out;
     }
 
+    function decorateMappedHandlers($elems, selector, mapping, fn) {
+        $.each(mapping, function (type, handler) {
+            var evtType = EventType.get(type, selector);
+            var decor = decorate(evtType.type, handler);
+
+            storeDecoratorLookup($elems, evtType, handler, decor);
+            mapping[type] = decor;
+        });
+        if (selector) {
+            fn.call($elems, selector, mapping);
+        } else {
+            fn.call($elems, mapping);
+        }
+    }
+
+    function decorateSingleHandler($elems, args, selector, typeIndex, handlerIndex, fn) {
+        var handler = args[handlerIndex];
+        var types = EventType.gets(args[typeIndex], selector);
+        var decor;
+        var type;
+
+        for (var i = 0, len = types.length; i < len; ++i) {
+            type = types[i];
+
+            args[typeIndex] = type.eventType;
+            decor = decorate(type.type, handler);
+            args[handlerIndex] = decor;
+
+            storeDecoratorLookup($elems, type, handler, decor);
+            fn.apply($elems, args);
+        }
+    }
+
     $.fn.bind = (function () {
         var running = false;
+        var bind = $.fn.bind;
 
-        function decorateHandler($elems, args, hi) {
-            var handler = args[hi];
-            var basicEventType;
+        function binder() {
+            // handle the actual binding
+            var $elems = this;
+            var args = arguments;
 
-            $.each(getEventTypes(args[0]), function (_, eventType) {
-                basicEventType = getBasicEventType(eventType);
-                args[0] = eventType;
-                args[hi] = decorate(basicEventType, handler);
+            if ($.type(args[0]) === 'object') {
+                // .bind(events)
 
-                setData($elems, eventType, null, handler, args[hi]);
-                originals.bind.apply($elems, args);
-            });
-        }
+                decorateMappedHandlers($elems, null, args[0], bind);
+            } else if ($.isFunction(args[1])) {
+                // .bind(eventType, handler(eventObject))
+                
+                decorateSingleHandler($elems, args, null, 0, 1, bind);
+            } else if ($.isFunction(args[2])) {
+                // .bind(eventType, eventData, handler(eventObject))
+                
+                decorateSingleHandler($elems, args, null, 0, 2, bind);
+            } else {
+                // just use the original functionality
+                // do not decorate .bind(eventType, [, eventData], preventBubble)
+                
+                bind.apply($elems, args);
+            }
+        };
 
         return function () {
             /*
-            decorates $.fn.bind
             .bind(eventType [, eventData], handler(eventObject))
             .bind(eventType [, eventData], preventBubble)
             .bind(events)
             */
  
             // the jQuery collection that the .bind is being applied against
-            var me = this;
+            var $elems = this;
             var args = arguments;
             var handler;
 
@@ -196,118 +213,128 @@
                 // jQuery 1.5 and 1.6 internally convert .bind(events) into a series of
                 // .bind(eventType [, eventData], handler(eventObject)) calls
                 // we want to avoid decorating things more than once
-                originals.bind.apply(me, args);
-                return me;
+                
+                bind.apply($elems, args);
+                return $elems;
             }
 
             running = true;
 
-            if ($.type(args[0]) === 'object') {
-                // .bind(events)
-                $.each(args[0], function (eventType, handler) {
-                    args[0][eventType] = decorate(getBasicEventType(eventType), handler);
-                });
-                originals.bind.apply(me, args);
-            } else if ($.isFunction(args[1])) {
-                // .bind(eventType, handler(eventObject))
-                decorateHandler(me, args, 1);
-            } else if ($.isFunction(args[2])) {
-                // .bind(eventType, eventData, handler(eventObject))
-                decorateHandler(me, args, 2);
-            } else {
-                // just use the original functionality
-                // do not decorate .bind(eventType, [, eventData], preventBubble)
-                originals.bind.apply(me, args);
+            try {
+                binder.apply($elems, args);
+            } finally {
+                running = false;
             }
 
-            running = false;
-
             // must return the jQuery set so chaining is not disrupted
-            return me;
+            return $elems;
         };
     })();
 
-    // .unbind() can be supported by using .data() to store a lookup between
-    // the original and final decorated handlers during .bind(); during
-    // .unbind(), we can get the decorated handler by looking it up using the
-    // original passed to .unbind()
+    $.fn.unbind = (function () {
+        var unbind = $.fn.unbind;
 
-    function unbind() {
-        /*
-        .unbind()
-        .unbind(eventType)
-        .unbind(eventType, handler)
-        .unbind(eventType, false)
-        .unbind(event)
-        */
+        return function () {
+            /*
+            .unbind()
+            .unbind(eventType)
+            .unbind(eventType, handler)
+            .unbind(eventType, false)
+            .unbind(event)
+            */
 
-        // we only care about .unbind(eventType, handler)
-        // all of the others can just use the original functionality
-        if (!$.isFunction(arguments[1])) {
-            return originals.unbind.apply(this, arguments);
-        }
+            var $elems = this;
+            var args = arguments;
 
-        var $elems = this;
-        var eventType = arguments[0];
-        var handler = arguments[1];
-        var key = NAME;
-        var expanded = expandEventType(eventType); // expanded event type
-        
-        // do any of the elements have a decorated handler for this event
-        // type or namespace?
-        $elems.each(function () {
-            var $el = $(this);
-            var boundData = $el.data(key) || {};
-
-            if (boundData) {
-                $.each(boundData, function (k, v) {
-                    if (isEventTypeMatch(expanded, v)) {
-                        $.each(v.handlers, function (_, o) {
-                            // there could be multiple instances of the same
-                            // original handler, but if there were different
-                            // decorators then the eventual decorated handler
-                            // would be different; must search over all
-                            if (o.original === handler) {
-                                originals.unbind.call($el, eventType, o.decorated);
-                            }
-                        });
-                    }
-                });
+            // we only care about .unbind(eventType, handler)
+            // all of the others can just use the original functionality
+            if (!$.isFunction(args[1])) {
+                return unbind.apply($elems, args);
             }
-        });
 
-        return originals.unbind.apply($elems, arguments);
-    }
+            var handler = args[1];
+            var evtType = EventType.get(args[0]);
+            
+            // do any of the elements have a decorated handler for this event
+            // type or namespace?
+            $elems.each(function () {
+                removeHandler($(this), evtType, handler, unbind);
+            });
 
-    $.fn.unbind = unbind;
+            return $elems;
+        };
+    })();
 
-    $.fn.delegate = function () {
-        // .delegate(selector, eventType, handler(eventObject))
-        // .delegate(selector, eventType, eventData, handler(eventObject))
-        // .delegate(selector, events)
+    $.fn.delegate = (function () {
+        var delegate = $.fn.delegate;
 
-        if ($.type(arguments[1]) === 'object') {
-            // .delegate(selector, events)
-        } else if ($.isFunction(arguments[2])) {
+        return function () {
             // .delegate(selector, eventType, handler(eventObject))
-
-        } else if ($.isFunction(arguments[3])) {
             // .delegate(selector, eventType, eventData, handler(eventObject))
-        } else {
-            // who knows what this is...just kick it to jQuery to deal with
-            return originals.delegate.apply(this, arguments);
-        }
-    };
+            // .delegate(selector, events)
 
-    $.fn.undelegate = function () {
-        // .undelegate() // 1.4.2
-        // .undelegate(selector, eventType) // 1.4.2
-        // .undelegate(selector, eventType, handler(eventObject)) // 1.4.2
-        // .undelegate(selector, events) // 1.4.3
-        // .undelegate(namespace) // 1.6
+            var $elems = this;
+            var args = arguments;
 
+            if ($.type(args[1]) === 'object') {
+                // .delegate(selector, events)
+                
+                decorateMappedHandlers($elems, args[0], args[1], delegate);
+            } else if ($.isFunction(args[2])) {
+                // .delegate(selector, eventType, handler(eventObject))
+                
+                decorateSingleHandler($elems, args, args[0], 1, 2, delegate);
+            } else if ($.isFunction(args[3])) {
+                // .delegate(selector, eventType, eventData, handler(eventObject))
 
-    };
+                decorateSingleHandler($elems, args, args[0], 1, 3, delegate);
+            } else {
+                // who knows what this is...just kick it to jQuery to deal with
+                delegate.apply(this, arguments);
+            }
+
+            return $elems;
+        };
+    })();
+
+    $.fn.undelegate = (function () {
+        var undelegate = $.fn.undelegate;
+
+        return function () {
+            // .undelegate() // 1.4.2
+            // .undelegate(selector, eventType) // 1.4.2
+            // .undelegate(selector, eventType, handler(eventObject)) // 1.4.2
+            // .undelegate(selector, events) // 1.4.3
+            // .undelegate(namespace) // 1.6
+
+            /*
+            jQuery requires the .undelegate() selector to be an exact match with the
+            .delegate() selector, including when there are multiple selectors in a comma
+            separated list (weird); this means that if you have:
+            
+            $foo.delegate  ('a, li', 'click', fn);
+            $foo.undelegate('a',     'click', fn); // this won't work
+            $foo.undelegate('li, a', 'click', fn); // this also won't work
+            $foo.undelegate('a, li', 'click', fn); // have to use the exact same selector
+            */
+
+            var $elems = this;
+            var args = arguments;
+
+            // anything that isn't .undelegate(selector, eventType, handler(eventObject))
+            if (!$.isFunction(args[2])) {
+                return undelegate.apply($elems, args);
+            }
+
+            // .undelegate(selector, eventType, handler(eventObject))
+            var data = $elems.data(NAME);
+            var evtType = EventType.get(args[1], args[0]);
+            
+            removeHandler($elems, evtType, args[2], undelegate);
+
+            return $elems;
+        };
+    })();
 
     /*if ($.fn.live) {
         $.fn.live = function () {};
