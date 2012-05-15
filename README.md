@@ -59,7 +59,7 @@ $.jedi('click', function (fn) {
     return function () {
         var start = $.now();
         var out = fn.apply(this, arguments);
-        console.log('took ' + $.now() - start + ' ms');
+        console.log('took ' + ($.now() - start) + ' ms');
         return out;
     };
 });
