@@ -23,6 +23,10 @@
     EventType.gets = function (s, selector) {
         // returns a list of EventType instances
 
+        if (selector === undefined) {
+            selector = null;
+        }
+
         // clean up the whitespace
         s = $.trim(s).replace(/\s+/, ' ');
 
@@ -162,7 +166,8 @@
 
     function removeAllStored($elems) {
         $elems.each(function () {
-            $(this).data(NAME).splice(0);
+            var data = $(this).data(NAME) || [];
+            data.splice(0);
         });
     }
 
@@ -262,7 +267,7 @@
             // (eventType, eventData, handler)
             // decorate the handler for each type of event
             
-            $.each(EventType.gets(eventType, null), function (i, evtType) {
+            $.each(EventType.gets(eventType), function (i, evtType) {
                 var decor = decorate(evtType.type, handler);
 
                 storeDecoratorLookup($elems, evtType, handler, decor);
@@ -273,70 +278,57 @@
         };
     })();
 
-    /*$.fn.bind = (function () {
-        var running = false;
-        var bind = $.fn.bind;
+    $.fn.unbind = (function () {
+        var unbind = $.fn.unbind;
 
-        function binder() {
-            // handle the actual binding
+        return function (eventType, handler) {
+            // .unbind()
+            // .unbind(eventType)
+            // .unbind(eventType, handler)
+            // .unbind(eventType, false)
+            // .unbind(event-map)
+            // .unbind(event)
+
             var $elems = this;
-            var args = arguments;
 
-            if ($.type(args[0]) === 'object') {
-                // .bind(events)
-
-                decorateMappedHandlers($elems, null, args[0], bind);
-            } else if ($.isFunction(args[1])) {
-                // .bind(eventType, handler(eventObject))
-                
-                decorateSingleHandler($elems, args, null, 0, 1, bind);
-            } else if ($.isFunction(args[2])) {
-                // .bind(eventType, eventData, handler(eventObject))
-                
-                decorateSingleHandler($elems, args, null, 0, 2, bind);
-            } else {
-                // just use the original functionality
-                // do not decorate .bind(eventType, [, eventData], preventBubble)
-                
-                bind.apply($elems, args);
-            }
-        }
-
-        return function () {
-            //.bind(eventType [, eventData], handler(eventObject))
-            //.bind(eventType [, eventData], preventBubble)
-            //.bind(events)
- 
-            // the jQuery collection that the .bind is being applied against
-            var $elems = this;
-            var args = arguments;
-            var handler;
-
-            if (running) {
-                // jQuery 1.5 and 1.6 internally convert .bind(events) into a series of
-                // .bind(eventType [, eventData], handler(eventObject)) calls
-                // we want to avoid decorating things more than once
-                
-                bind.apply($elems, args);
+            if (typeof eventType === 'object' && !eventType.preventDefault) {
+                // (event-map)
+                $.each(eventType, function (type, fn) {
+                    $elems.unbind(type, fn);
+                });
                 return $elems;
             }
 
-            running = true;
-
-            try {
-                // TODO: convert to
-                // binder($elems, args);
-                binder.apply($elems, args);
-            } finally {
-                running = false;
+            if (arguments.length === 0) {
+                // ()
+                removeAllStored($elems);
+                return unbind.call($elems);
             }
 
-            // must return the jQuery set so chaining is not disrupted
+            if (handler === false) {
+                // (eventType, false)
+                // nothing to do; just pass along to jQuery
+                return unbind.call($elems, eventType, handler);
+            }
+
+            if (typeof eventType === 'object') {
+                // (event)
+                handler = eventType.handler;
+                eventType = eventType.type; // should we be worried about losing the namespace? 1.5 doesn't seem to be.
+            }
+
+            // TODO: jQuery supports multiple whitespace separated event types in the string
+
+            // (eventType)
+            // (eventType, handler)
+            removeHandlers($elems, EventType.get(eventType), handler, unbind);
+            unbind.call($elems, eventType, handler);
+
             return $elems;
         };
-    })();*/
+    })();
 
-    $.fn.unbind = (function () {
+    /*$.fn.unbind = (function () {
         var unbind = $.fn.unbind;
 
         function getSignatureType(args) {
@@ -408,7 +400,7 @@
 
             return $elems;
         };
-    })();
+    })();*/
 
     /*$.fn.delegate = (function () {
         var delegate = $.fn.delegate;
@@ -488,6 +480,7 @@
             // .live(events, data, handler)
             // .live(events-map)
 
+            var $el = this;
             if (typeof events === 'object') {
                 // (events-map)
 
@@ -497,7 +490,7 @@
             }
 
             if (running) {
-                return this;
+                return $el;
             }
             running = true;
 
@@ -507,8 +500,7 @@
                 data = undefined;
             }
 
-            var $el = this;
-            var selector = origSelector || this.selector;
+            var selector = origSelector || $el.selector;
             var evtTypes = EventType.gets(events, selector);
 
             $.each(evtTypes, function (_, evtType) {
@@ -520,7 +512,7 @@
 
             running = false;
 
-            return this;
+            return $el;
         };
     })();
 

@@ -1198,7 +1198,6 @@
 
             $.jedi('click', decorators[0]);
 
-            debugger;
             this.$ul
                 .delegate('li', 'click', sp[2])
                 .delegate('li', 'change', sp[3])
@@ -1222,7 +1221,7 @@
         QUnit.module(jqVersion + ': undelegate', test_config);
 
         QUnit.test('()', function () {
-            var sp = createSpies(3);
+            var sp = createSpies(4);
             var dsp = createSpies(1, 'decor');
             var decorators = createDecorators(dsp);
  
@@ -1240,6 +1239,7 @@
 
             var originalCopy = $.extend(true, [], this.$li0.data('js-jedi'));
 
+            debugger;
             this.$li0.undelegate();
 
             this.$li0.click();
