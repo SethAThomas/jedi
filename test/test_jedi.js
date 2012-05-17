@@ -1,15 +1,71 @@
 /*global QUnit, sinon*/
 (function ($) {
     $(function () {
-        var tests = {},
-            jqVersions = {
-                '$jq15': '1.5',
-                '$jq16': '1.6',
-                '$jq17': '1.7'
-            };
+        var tests = {};
+        var jqVersions = {
+            '$jq15': '1.5',
+            '$jq16': '1.6',
+            '$jq17': '1.7'
+        };
+        var jqEnvironments = {};
 
-        function getOddItems(arr) {
-            // returns a list of only the odd indexed items from 'arr'
+        var Decorators = {
+            lookup: [],
+            add: function (fn, decor) {
+                this.lookup.push([fn, decor]);
+            },
+            get: function (fn, numOccur) {
+                // it's possible that "fn" will be used several times
+                // numOccur indicates which occurence to use
+                numOccur = numOccur || 1;
+                var seen = 0;
+                for (var i = 0, len = this.lookup.length; i < len; ++i) {
+                    if (this.lookup[i][0] === fn) {
+                        if (++seen >= numOccur) {
+                            // there may be multiple decorators wrapped around
+                            // the original function; recursively search until
+                            // we've found the outer decorator
+                            return this.get(this.lookup[i][1]);
+                        }
+                    }
+                }
+                return fn;
+            },
+            reset: function () {
+                this.lookup = [];
+            }
+        };
+
+        function slice(arr) {
+            var context = arguments[0];
+            var args = Array.prototype.slice.call(arguments, 1);
+            return Array.prototype.slice.apply(context, args);
+        }
+
+        function extractMsg(args) {
+            // extracts an optional message from the last index position in the list
+            var last = args[args.length - 1];
+            var msg;
+
+            if ($.type(last) === 'string' || last === undefined || last === null) {
+                args.splice(-1, 1);
+                msg = last;
+            }
+            return msg;
+        }
+
+        function getMsg(msg, args) {
+            var msgArg = extractMsg(args);
+
+            if (msgArg) {
+                return msg + ' (' + msgArg + '): ';
+            } else {
+                return msg + ': ';
+            }
+        }
+
+        function getEvenItems(arr) {
+            // returns a list of only the even indexed items from 'arr'
             var out = [];
             for (var i = 0, len = arr.length; i < len; i += 2) {
                 out[out.length] = arr[i];
@@ -17,9 +73,9 @@
             return out;
         }
 
-        function getEvenItems(arr) {
-            // returns a list of only the even indexed items from 'arr'
-            return getOddItems(arr.slice(1));
+        function getOddItems(arr) {
+            // returns a list of only the odd indexed items from 'arr'
+            return getEvenItems(arr.slice(1));
         }
 
         function AutoNamer(language) {
@@ -28,6 +84,12 @@
             this.current = this.language[0];
             this.multi = 1;
         }
+
+        AutoNamer.prototype.set = function (name, obj) {
+            if (!this.known.hasOwnProperty(name)) {
+                this.known[name] = obj;
+            }
+        };
 
         AutoNamer.prototype.next = function () {
             // returns the next auto name
@@ -65,7 +127,12 @@
             });
 
             if (!name) {
-                name = this.next();
+                while (1) {
+                    name = this.next();
+                    if (!this.known.hasOwnProperty(name)) {
+                        break;
+                    }
+                }
                 this.known[name] = obj;
             }
 
@@ -78,15 +145,286 @@
             this.known = {};
         };
 
+        function module(name, $, jqVersion) {
+            QUnit.module(jqVersion + ' ' + name, {
+                setup: function () {
+                    $.extend(window, jqEnvironments[jqVersion]);
+                    setup.call(this);
+
+                    this.decor = createSpy('decor');
+                    this.decorator = createDecorator(this.decor);
+                },
+                teardown: function () {
+                    teardown();
+                }
+            });
+        }
+
+        var setupEnvironment = function ($) {
+            // control which version of jQuery owns $
+
+            var o = {};
+
+            o.autonames = new AutoNamer();
+
+            o.jediify = function () {
+                var args = Array.prototype.slice.apply(arguments);
+                var events = args.slice(0, -1);
+                var spies = args[args.length - 1];
+
+                if (events.length !== spies.length) {
+                    throw new Error('[jediify] event type / decorator mismatch;\n' + events.length + ' !== ' + spies.length);
+                }
+
+                var decorators = createDecorators(spies);
+
+                $.each(events, function (i, type) {
+                    $.jedi(type, decorators[i]);
+                });
+            };
+
+            o.createDecorator = function (spy) {
+                return function (fn) {
+                    var wrapped = function () {
+                        spy();
+                        return fn.apply(this, arguments);
+                    };
+
+                    Decorators.add(fn, wrapped);
+
+                    return wrapped;
+                };
+            };
+
+            o.createDecorators = function (spies) {
+                return $.map(spies, function (spy) {
+                    return createDecorator(spy);
+                });
+            };
+
+            o.createSpy = function (name) {
+                var spy;
+                var fn = function () {
+                    // the first argument passed to a jQuery event handler
+                    // is an instance of jQuery.Event; deep copying using
+                    // $.extend() only works on complex key-values of 
+                    // arrays and plain objects; jQuery.Event is not a plain
+                    // object, so the deep copy won't step into the jQuery.Event
+                    // instance; however, you can explicitly tell jQuery to
+                    // copy one of these instances, which is what we're doing here
+
+                    // copying [jQuery.Event, ..., ...] doesn't work, so explicitly copy
+                    // each item in arguments
+                    var args = $.map(arguments, function (arg) {
+                        switch ($.type(arg)) {
+                        case 'object':
+                            return $.extend(true, {}, arg);
+                        case 'array':
+                            return $.extend(true, [], arg);
+                        default:
+                            return arg;
+                        }
+                    });
+                    spy.args[spy.args.length - 1] = args;
+                };
+                spy = sinon.spy(fn);
+
+                if (name) {
+                    autonames.set(name, spy);
+                }
+
+                return spy;
+            };
+
+            o.createSpies = function (num, prefix) {
+                prefix = prefix || 'spy';
+                var spies = [];
+                for (var i = 0; i < num; ++i) {
+                    spies[spies.length] = createSpy(prefix + i);
+                }
+                return spies;
+            };
+
+            o.verifyCallCountPairs = function () {
+                // similar to verifyCallCount, except that there should be
+                // pairs of arguments: an expected count and a spy
+
+                var args = Array.prototype.slice.call(arguments);
+                // last argument can optionally be a msg description
+                var msg = args[args.length === 0 ? 0 : args.length - 1];
+
+                if ($.type(msg) === 'string') {
+                    args.splice(-1, 1);
+                    msg = 'call counts (' + msg + '): ';
+                } else {
+                    msg = 'call count: ';
+                }
+
+                var counts = getEvenItems(args);
+                var spies = getOddItems(args);
+                var names = autonames.gets.apply(autonames, spies);
+
+                msg += '[' + names.join(', ') + ']; ';
+
+                for (var i = 0, len = spies.length; i < len; ++i) {
+                    QUnit.strictEqual(
+                        counts[i],
+                        spies[i].callCount,
+                        msg + names[i] + '(' + i + ') should be called ' + counts[i] + ' times'
+                    );
+                }
+            };
+
+            o.verifyCallCount = function (count) {
+                var args = slice(arguments, 1);
+                // last argument can optionally be a msg description
+                var msg = getMsg('call count', args);
+                
+                var names = autonames.gets.apply(autonames, args);
+
+                msg += '[' + names.join(', ') + ']; ';
+
+                $.each(args, function (i, spy) {
+                    var name = names[i] + '(' + i + ')';
+                    QUnit.strictEqual(spy.callCount, count, msg + name + ' should be called ' + count + ' times');
+                });
+            };
+
+            o.verifyCallCounts = function (count) {
+                // accepts lists of spies
+                var args = slice(arguments, 1);
+                var msg = extractMsg(args);
+
+                var spies = [];
+                $.each(args, function (_, arr) {
+                    spies = spies.concat(arr);
+                });
+
+                verifyCallCount.apply({}, [count].concat(spies).concat([msg]));
+            };
+
+            o.verifyCallOrder = function () {
+                // verifies that a list of spies were called in order
+                // ex:
+                // verifyCallOrder(evt1, evt2, evt1, decor, evt3)
+                //   -- verifies that:
+                //     - evt1 called before evt2
+                //     - evt2 called before evt1 (2nd call)
+                //     - evt1 (2nd) called before decor
+                //     - decor called before evt3
+                
+                var args = Array.prototype.slice.apply(arguments);
+                // last argument can optionally be a msg description
+                var msg = args[args.length === 0 ? 0 : args.length - 1];
+                
+                if ($.type(msg) === 'string') {
+                    args.splice(-1, 1);
+                    msg = 'call order (' + msg + '): ';
+                } else {
+                    msg = 'call order: ';
+                }
+                
+                // assign some designator names to the spies
+                var names = autonames.gets.apply(autonames, args);
+                
+                msg += '[' + names.join(', ') + ']; ';
+
+                $.each(args, function (i, spy) {
+                    if (i > 0) {
+                        var a = names[i - 1] + '(' + (i - 1) + ')';
+                        var b = names[i] + '(' + i + ')';
+                        QUnit.ok(args[i - 1].calledBefore(spy), msg + a + ' should be before ' + b);
+                    }
+                });
+            };
+
+            o.verifyThis = function (theThis) {
+                // verifies that each spy was called with theThis as the "this"
+
+                var args = Array.prototype.slice.call(arguments, 1);
+                // last argument can optionally be a msg description
+                var msg = args[args.length === 0 ? 0 : args.length - 1];
+
+                if ($.type(msg) === 'string') {
+                    args.splice(-1, 1);
+                    msg = 'verifying "this" (' + msg + '): ';
+                } else {
+                    msg = 'verifying "this": ';
+                }
+
+                // assign some designator names to the spies
+                var names = autonames.gets.apply(autonames, args);
+
+                msg += '[' + names.join(', ') + ']; ';
+
+                $.each(args, function (i, spyObj) {
+                    var name = names[i] + '(' + i + ')';
+                    if (spyObj.thisValues) {
+                        // sinon.spy instance
+                        QUnit.ok(spyObj.alwaysCalledOn(theThis), msg + name);
+                    } else {
+                        // sinon.spyCall instance
+                        QUnit.ok(spyObj.calledOn(theThis), msg + name);
+                    }
+                });
+            };
+
+            o.verifyDatas = function (callIndex) {
+                var args = slice(arguments, 1);
+                var msg = getMsg('verifying data', args);
+
+                var datas = getEvenItems(args);
+                var spies = getOddItems(args);
+
+                var names = autonames.gets.apply(autonames, spies);
+                msg += '[' + names.join(', ') + ']; ';
+
+                $.each(datas, function (i, data) {
+                    var name = names[i] + '(' + i + ')';
+                    QUnit.deepEqual(data, spies[i].args[callIndex][0].data, msg + name);
+                });
+            };
+
+            o.setup = function () {
+                var $sandbox = $('#qunit-fixture');
+                var content = [
+                    '<ul>',
+                    '    <li>first</li>',
+                    '    <li>second</li>',
+                    '    <li>third</li>',
+                    '</ul>'
+                ].join('');
+
+                $sandbox.append(content);
+
+                Decorators.reset();
+                autonames.reset();
+
+                this.$ul = $('ul', $sandbox);
+                this.$lis = $('li', $sandbox);
+                this.$li0 = this.$lis.eq(0);
+                this.$li1 = this.$lis.eq(1);
+                this.$li2 = this.$lis.eq(2);
+            };
+
+            o.teardown = function () {
+                $.unjedi();
+            };
+
+            return o;
+        }
+
+        // ################ tests ######################
+
         tests.jQueryVersion = function ($, jqVersion) {
             QUnit.test('jQuery version', function () {
                 // sanity check to ensure we are really testing with the right version of jQuery
 
-                QUnit.strictEqual($().jquery, jqVersion);
+                QUnit.strictEqual($().jquery, jqVersion, $().jquery + ' === ' + jqVersion);
             });
         };
 
-        tests.shortcutEvents = function ($, jqVersion) {
+        /*tests.shortcutEvents = function ($, jqVersion) {
             QUnit.module(jqVersion + ' bind decoration', {
                 setup: function () {
                     var $sandbox = $('#qunit-fixture');
@@ -462,303 +800,279 @@
                 QUnit.ok(evt4.calledOnce, 'evt4 was not called');
                 QUnit.strictEqual(decor.callCount, 4, 'decor was called');
             });
-        };
+        };*/
 
         tests.bind = function ($, jqVersion) {
-            var autonames = new AutoNamer();
-
-            QUnit.module(jqVersion + ' bind', {
-                setup: function () {
-                    var $sandbox = $('#qunit-fixture');
-                    var content = [
-                            '<ul>',
-                            '    <li>first</li>',
-                            '    <li>second</li>',
-                            '    <li>third</li>',
-                            '</ul>'
-                        ].join(''),
-                        me = this;
-
-                    $sandbox.append(content);
-
-                    this.$ul = $('ul', $sandbox);
-                    this.$lis = $('li', $sandbox);
-                    this.$li0 = this.$lis.eq(0);
-                    this.$li1 = this.$lis.eq(1);
-                    this.$li2 = this.$lis.eq(2);
-
-                    this.decor = sinon.stub();
-                    this.decorator = function (fn) {
-                        return function () {
-                            me.decor();
-                            return fn.apply(this, arguments);
-                        };
-                    };
-
-                    autonames.reset();
-                },
-                teardown: function () {
-                    $.unjedi();
-                }
-            });
-
-            function copier(fn) {
-                return function () {
-                    var args = $.extend(true, [], arguments);
-                    return fn.apply(this, args);
-                };
-            }
-
-            function createSpy() {
-                return sinon.spy(copier(function () {}));
-            }
-
-            function createSpies(num) {
-                var spies = [];
-                for (var i = 0; i < num; ++i) {
-                    spies[spies.length] = createSpy();
-                }
-                return spies;
-            }
-
-            function verifyCallCountPairs() {
-                // similar to verifyCallCount, except that there should be
-                // pairs of arguments: an expected count and a spy
-
-                var args = Array.prototype.slice.call(arguments);
-                // last argument can optionally be a msg description
-                var msg = args[args.length === 0 ? 0 : args.length - 1];
-
-                if ($.type(msg) === 'string') {
-                    args.splice(-1, 1);
-                    msg = 'call counts (' + msg + '): ';
-                } else {
-                    msg = 'call count: ';
-                }
-
-                var counts = getOddItems(args);
-                var spies = getEvenItems(args);
-                var names = autonames.gets.apply(autonames, spies);
-
-                msg += '[' + names.join(', ') + ']; ';
-
-                for (var i = 0, len = spies.length; i < len; ++i) {
-                    QUnit.strictEqual(
-                        counts[i],
-                        spies[i].callCount,
-                        msg + names[i] + '(' + i + ') should be called ' + counts[i] + ' times'
-                    );
-                }
-            }
-
-            function verifyCallCount(count) {
-                var args = Array.prototype.slice.call(arguments, 1);
-                // last argument can optionally be a msg description
-                var msg = args[args.length === 0 ? 0 : args.length - 1];
-
-                if ($.type(msg) === 'string') {
-                    args.splice(-1, 1);
-                    msg = 'call count (' + msg + '): ';
-                } else {
-                    msg = 'call count: ';
-                }
-
-                var names = autonames.gets.apply(autonames, args);
-
-                msg += '[' + names.join(', ') + ']; ';
-
-                $.each(args, function (i, spy) {
-                    var name = names[i] + '(' + i + ')';
-                    QUnit.strictEqual(spy.callCount, count, msg + name + ' should be called ' + count + ' times');
-                });
-            }
-
-            function verifyCallOrder() {
-                // verifies that a list of spies were called in order
-                // ex:
-                // verifyCallOrder(evt1, evt2, evt1, decor, evt3)
-                //   -- verifies that:
-                //     - evt1 called before evt2
-                //     - evt2 called before evt1 (2nd call)
-                //     - evt1 (2nd) called before decor
-                //     - decor called before evt3
-                
-                var args = Array.prototype.slice.apply(arguments);
-                // last argument can optionally be a msg description
-                var msg = args[args.length === 0 ? 0 : args.length - 1];
-                
-                if ($.type(msg) === 'string') {
-                    args.splice(-1, 1);
-                    msg = 'call order (' + msg + '): ';
-                } else {
-                    msg = 'call order: ';
-                }
-                
-                // assign some designator names to the spies
-                var names = autonames.gets.apply(autonames, args);
-                
-                msg += '[' + names.join(', ') + ']; ';
-
-                $.each(args, function (i, spy) {
-                    if (i > 0) {
-                        var a = names[i - 1] + '(' + (i - 1) + ')';
-                        var b = names[i] + '(' + i + ')';
-                        QUnit.ok(args[i - 1].calledBefore(spy), msg + a + ' should be before ' + b);
-                    }
-                });
-            }
-
-            function verifyThis(theThis) {
-                // verifies that each spy was called with theThis as the "this"
-
-                var args = Array.prototype.slice.call(arguments, 1);
-                // last argument can optionally be a msg description
-                var msg = args[args.length === 0 ? 0 : args.length - 1];
-
-                if ($.type(msg) === 'string') {
-                    args.splice(-1, 1);
-                    msg = 'verifying "this" (' + msg + '): ';
-                } else {
-                    msg = 'verifying "this": ';
-                }
-
-                // assign some designator names to the spies
-                var names = autonames.gets.apply(autonames, args);
-
-                msg += '[' + names.join(', ') + ']; ';
-
-                $.each(args, function (i, spyObj) {
-                    var name = names[i] + '(' + i + ')';
-                    if (spyObj.thisValues) {
-                        // sinon.spy instance
-                        QUnit.ok(spyObj.alwaysCalledOn(theThis), msg + name);
-                    } else {
-                        // sinon.spyCall instance
-                        QUnit.ok(spyObj.calledOn(theThis), msg + name);
-                    }
-                });
-            }
-
+            module('bind', $, jqVersion);
+ 
             QUnit.test('.bind(eventType, handler(eventObject))', function () {
-                var evt1 = sinon.stub(),
-                    evt2 = sinon.stub();
+                /*
+                test checklist ([+] done, [-] not needed, [] not done):
+                [+] undecorated - non-namespace
+                [+] undecorated - namespace
+                [+] undecorated - multiple event types
+                [+] undecorated - chaining
+                [+] decorated - non-namespace
+                [+] decorated - namespace
+                [+] decorated - multiple event types
+                [+] decorated - chaining
+                [+] trigger - non-namespace
+                [+] trigger - namespace
+                [+] trigger - non-bound event type
+                [+] call order
+                [+] "this"
+                */
 
-                // bind an event w/o decoration
-                this.$lis.bind('click', evt1);
+                var sp = createSpies(7);
+                var dsp = createSpies(2, 'decor');
 
-                // add decorator
-                $.jedi('click', this.decorator);
-                
-                // bind an event w/ decorator
-                this.$lis.bind('click', evt2);
+                // undecorated
+                this.$lis // chaining
+                    .bind('click', sp[0]) // non-namespace
+                    .bind('click.a', sp[1]) // namespace
+                    .bind('click change foo.a bar.b', sp[2]) // multiple event types
+                ;
 
-                // pre-call sanity checks
-                verifyCallCount(0, evt1, evt2, this.decor);
+                jediify('click', 'change', dsp);
 
-                // trigger event
-                this.$li0.click();
+                // decorated
+                this.$lis // chaining
+                    .bind('click', sp[3]) // non-namespace
+                    .bind('click.a', sp[4]) // namespace
+                    .bind('click change foo.a bar.b', sp[5]) // multiple event types
+                    .bind('foo', sp[6])
+                ;
 
-                // verify call count
-                verifyCallCount(1, evt1, evt2, this.decor);
+                // pre trigger sanity checks
+                verifyCallCounts(0, sp, dsp);
 
-                // verify call order
-                verifyCallOrder(evt1, this.decor, evt2);
+                // trigger non-namespace
+                this.$li0.trigger('click');
 
-                // verify "this"
-                verifyThis(this.$li0[0], evt1, evt2);
+                verifyCallCounts(1, sp[0], sp[1], sp[2], sp[3], sp[4], sp[5]);
+                verifyCallCounts(3, dsp[0]);
+                verifyCallCount(0, sp[6], dsp[1]);
+
+                verifyCallOrder(sp[0], sp[1], sp[2], dsp[0], sp[3], dsp[0], sp[4], dsp[0], sp[5]); // order
+                verifyThis(this.$li0[0], sp[0], sp[1], sp[2], sp[3], sp[4], sp[5]); // "this"
+
+                // trigger namespace
+                this.$li0.trigger('foo.a');
+
+                verifyCallCount(1, sp[0], sp[1], sp[3], sp[4]);
+                verifyCallCount(2, sp[2], sp[5]);
+                verifyCallCount(3, dsp[0]);
+                verifyCallCount(0, sp[6], dsp[1]);
+
+                // trigger non-bound event type
+                this.$li0.trigger('wizz');
+
+                verifyCallCount(1, sp[0], sp[1], sp[3], sp[4]);
+                verifyCallCount(2, sp[2], sp[5]);
+                verifyCallCount(3, dsp[0]);
+                verifyCallCount(0, sp[6], dsp[1]);
             });
 
             QUnit.test('.bind(eventType, eventData, handler(eventObject))', function () {
-                var data1,
-                    data2,
-                    evt1 = sinon.spy(function (evt) {
-                        data1 = $.extend(true, {}, evt.data);
-                    }),
-                    evt2 = sinon.spy(function (evt) {
-                        data2 = $.extend(true, {}, evt.data);
-                    });
+                /*
+                test checklist ([+] done, [-] not needed, [] not done):
+                [+] undecorated - non-namespace
+                [+] undecorated - namespace
+                [+] undecorated - multiple event types
+                [+] undecorated - chaining
+                [+] decorated - non-namespace
+                [+] decorated - namespace
+                [+] decorated - multiple event types
+                [+] decorated - chaining
+                [+] trigger - non-namespace
+                [+] trigger - namespace
+                [+] trigger - non-bound event type
+                [+] call order
+                [+] "this"
+                [+] event.data
+                */
 
-                // bind an event w/o decoration
-                this.$lis.bind('click', {msg: 'undecorated event data'}, evt1);
+                var sp = createSpies(7);
+                var dsp = createSpies(2, 'decor');
+                var datas = [
+                    {msg: 'data 0'},
+                    {msg: 'data 1'},
+                    {msg: 'data 2'},
+                    {msg: 'data 3'},
+                    {msg: 'data 4'},
+                    {msg: 'data 5'},
+                    {msg: 'data 6'}
+                ];
 
-                // add decorator
-                $.jedi('click', this.decorator);
-                
-                // bind an event w/ decorator
-                this.$lis.bind('click', {msg: 'decorated event data'}, evt2);
+                // undecorated
+                this.$lis // chaining
+                    .bind('click', datas[0], sp[0]) // non-namespace
+                    .bind('click.a', datas[1], sp[1]) // namespace
+                    .bind('click change foo.a bar.b', datas[2], sp[2]) // multiple event types
+                ;
 
-                // pre-call sanity checks
-                verifyCallCount(0, evt1, evt2, this.decor);
+                jediify('click', 'change', dsp);
 
-                // trigger event
-                this.$li0.click();
+                // decorated
+                this.$lis // chaining
+                    .bind('click', datas[3], sp[3]) // non-namespace
+                    .bind('click.a', datas[4], sp[4]) // namespace
+                    .bind('click change foo.a bar.b', datas[5], sp[5]) // multiple event types
+                    .bind('foo', datas[6], sp[6])
+                ;
 
-                // verify call count
-                verifyCallCount(1, evt1, evt2, this.decor);
+                // pre trigger sanity checks
+                verifyCallCounts(0, sp, dsp);
 
-                // verify call order
-                verifyCallOrder(evt1, this.decor, evt2);
+                // trigger non-namespace
+                this.$li0.trigger('click');
 
-                // verify "this"
-                verifyThis(this.$li0[0], evt1, evt2);
+                verifyCallCounts(1, sp[0], sp[1], sp[2], sp[3], sp[4], sp[5]);
+                verifyCallCounts(3, dsp[0]);
+                verifyCallCount(0, sp[6], dsp[1]);
 
-                // verify the event data
-                QUnit.ok(data1.msg === 'undecorated event data', 'evt1 event data');
-                QUnit.ok(data2.msg === 'decorated event data', 'evt2 event data');
+                verifyCallOrder(sp[0], sp[1], sp[2], dsp[0], sp[3], dsp[0], sp[4], dsp[0], sp[5]); // order
+                verifyThis(this.$li0[0], sp[0], sp[1], sp[2], sp[3], sp[4], sp[5]); // "this"
+                // event.data
+                verifyDatas(
+                    0, // compare the first call
+                    datas[0], sp[0],
+                    datas[1], sp[1],
+                    datas[2], sp[2],
+                    datas[3], sp[3],
+                    datas[4], sp[4],
+                    datas[5], sp[5]
+                );
+
+                // trigger namespace
+                this.$li0.trigger('foo.a');
+
+                verifyCallCount(1, sp[0], sp[1], sp[3], sp[4]);
+                verifyCallCount(2, sp[2], sp[5]);
+                verifyCallCount(3, dsp[0]);
+                verifyCallCount(0, sp[6], dsp[1]);
+
+                // trigger non-bound event type
+                this.$li0.trigger('wizz');
+
+                verifyCallCount(1, sp[0], sp[1], sp[3], sp[4]);
+                verifyCallCount(2, sp[2], sp[5]);
+                verifyCallCount(3, dsp[0]);
+                verifyCallCount(0, sp[6], dsp[1]);
             });
 
             QUnit.test('.bind(eventType, preventBubble)', function () {
-                var evt = sinon.stub();
+                var evt1 = createSpy('evt1');
+                var evt2 = createSpy('evt2');
+                var evt3 = createSpy('evt3');
+                var decor = this.decor;
 
                 $.jedi('click', this.decorator);
 
-                this.$lis.bind('click', false); // should prevent the event from bubbling
-                this.$ul.bind('click', evt);
+                this.$ul.bind('click change wizz', evt1);
 
-                this.$li0.click();
+                this.$li0.click(); // event should bubble to $ul
 
-                verifyCallCount(0, evt, 'evt should not be called');
+                verifyCallCount(1, evt1, decor);
+                verifyCallCount(0, evt2, evt3);
+                
+                this.$li0
+                    .bind('click', false) // should prevent the event from bubbling
+                    .bind('click', evt2);
+
+                this.$li1
+                    .bind('click.a wizz', false) // prove namespaces work
+                    .bind('change', evt3); // prove chaining works
+
+                this.$li0.click(); // event should not bubble to $ul
+
+                verifyCallCountPairs(
+                    1, evt1,
+                    1, evt2,
+                    0, evt3,
+                    2, decor
+                );
+
+                this.$li1.trigger('click.a');
+
+                verifyCallCountPairs(
+                    1, evt1,
+                    1, evt2,
+                    0, evt3,
+                    2, decor
+                );
+
+                this.$li1.change();
+
+                verifyCallCountPairs(
+                    2, evt1,
+                    1, evt2,
+                    1, evt3,
+                    2, decor
+                );
+
+                this.$li1.trigger('wizz');
+                
+                verifyCallCountPairs(
+                    2, evt1,
+                    1, evt2,
+                    1, evt3,
+                    2, decor
+                );
             });
 
             QUnit.test('.bind(eventType, eventData, preventBubble)', function () {
-                var evt = sinon.stub();
+                var evt1 = createSpy('evt1');
 
                 $.jedi('click', this.decorator);
 
                 this.$lis.bind('click', {msg: 'hello'}, false); // should prevent the event from bubbling
-                this.$ul.bind('click', evt);
+                this.$ul.bind('click', evt1);
 
                 this.$li0.click();
 
-                verifyCallCount(0, evt, 'evt should not be called');
+                verifyCallCount(0, evt1, 'event should not be called');
             });
 
             QUnit.test('.bind(events)', function () {
-                var evt1 = sinon.stub();
-                var evt2 = sinon.stub();
-                var evt3 = sinon.stub();
+                var evt1 = createSpy('evt1');
+                var evt2 = createSpy('evt2');
+                var evt3 = createSpy('evt3');
+                var evt4 = createSpy('evt4');
                 var decor = this.decor;
+                var decor2 = createSpy('decor2');
+                var decorator2 = createDecorator(decor2);
 
                 $.jedi('click change', this.decorator);
+                $.jedi('click', decorator2);
 
                 this.$lis.bind({
                     click: evt1,
                     change: evt2,
-                    focus: evt3
-                });
+                    'focus.b': evt3
+                }).bind('click.a.b change.b focus.a', evt4);
 
                 this.$li0.click();
                 this.$li0.change();
-                this.$li0.focus();
+                this.$li0.trigger('focus.b');
 
                 verifyCallCount(1, evt1, evt2, evt3);
-                verifyCallCount(2, decor);
+                verifyCallCount(2, evt4);
+                verifyCallCount(4, decor);
+                verifyCallCount(2, decor2);
 
-                verifyCallOrder(decor, evt1, decor, evt2, evt3);
+                verifyCallOrder(decor, decor2, evt1, decor, evt2, evt3);
+
+                this.$li0.trigger('click.a');
+
+                verifyCallCount(1, evt1, evt2, evt3);
+                verifyCallCount(3, evt4);
+                verifyCallCount(5, decor);
+                verifyCallCount(3, decor2);
             });
 
             QUnit.test('.bind using multiple space delimited event types', function () {
-                var evt1 = sinon.spy();
+                var evt1 = createSpy('evt1');
 
                 $.jedi('click dblclick', this.decorator);
 
@@ -773,7 +1087,7 @@
             });
 
             QUnit.test('.<eventType>(handler(eventObject))', function () {
-                var evt1 = sinon.stub();
+                var evt1 = createSpy('evt1');
 
                 $.jedi('click', this.decorator);
 
@@ -787,7 +1101,7 @@
 
             
             QUnit.test('.<eventType>(eventData, handler(eventObject))', function () {
-                var evt1 = createSpy();
+                var evt1 = createSpy('evt1');
                 var data = {msg: 'hello'};
 
                 $.jedi('click', this.decorator);
@@ -803,11 +1117,11 @@
             });
 
             QUnit.test('.bind using namespaces', function () {
-                var evt1 = createSpy();
-                var evt2 = createSpy();
-                var evt3 = createSpy();
-                var evt4 = createSpy();
-                var evt5 = createSpy();
+                var evt1 = createSpy('evt1');
+                var evt2 = createSpy('evt2');
+                var evt3 = createSpy('evt3');
+                var evt4 = createSpy('evt4');
+                var evt5 = createSpy('evt5');
                 var decor = this.decor;
 
                 $.jedi('click foo wizz', this.decorator);
@@ -841,11 +1155,75 @@
                 );
             });
 
-            QUnit.test('.unbind()', function () {
-                var evt1 = createSpy();
-                var decor = this.decor;
+            QUnit.test('.bind sets the js-jedi data', function () {
+                var sp = createSpies(6, 'evt');
+                var dsp = createSpies(3, 'decor');
+                var decorators = createDecorators(dsp);
 
-                $.jedi('click', this.decorator);
+                this.$lis
+                    .bind('click', sp[0])
+                    .bind('change.a.b', sp[1])
+                    .bind('foo bar.b', sp[2]);
+
+                $.jedi('click', decorators[0]);
+                $.jedi('change', decorators[1]);
+                $.jedi('foo bar', decorators[2]);
+
+                this.$lis
+                    .bind('click', sp[3])
+                    .bind('change.a.b', sp[4])
+                    .bind('foo bar.b', sp[5]);
+
+                var data = [
+                    {
+                        eventType: 'click',
+                        namespaces: [],
+                        type: 'click',
+                        selector: null,
+                        original: sp[3],
+                        decorated: Decorators.get(sp[3])
+                    },
+                    {
+                        eventType: 'change.a.b',
+                        namespaces: ['a', 'b'],
+                        type: 'change',
+                        selector: null,
+                        original: sp[4],
+                        decorated: Decorators.get(sp[4])
+                    },
+                    {
+                        eventType: 'foo',
+                        namespaces: [],
+                        type: 'foo',
+                        selector: null,
+                        original: sp[5],
+                        decorated: Decorators.get(sp[5])
+                    },
+                    {
+                        eventType: 'bar.b',
+                        namespaces: ['b'],
+                        type: 'bar',
+                        selector: null,
+                        original: sp[5],
+                        decorated: Decorators.get(sp[5], 2)
+                    }
+                ];
+
+                QUnit.deepEqual(this.$li0.data('js-jedi'), data);
+                QUnit.deepEqual(this.$li1.data('js-jedi'), data);
+                QUnit.deepEqual(this.$li2.data('js-jedi'), data);
+            });
+        };
+
+        tests.unbind = function ($, jqVersion) {
+            module('unbind', $, jqVersion);
+            
+            QUnit.test('.unbind()', function () {
+                var evt1 = createSpy('evt1');
+                var decor = createSpy('decor1');
+                var decorator = createDecorator(decor);
+
+                $.jedi('click', decorator);
 
                 this.$lis.bind('click', evt1);
 
@@ -868,11 +1246,12 @@
             });
 
             QUnit.test('.unbind(eventType)', function () {
-                var evt1 = createSpy();
-                var evt2 = createSpy();
-                var decor = this.decor;
+                var evt1 = createSpy('evt1');
+                var evt2 = createSpy('evt2');
+                var decor = createSpy('decor1');
+                var decorator = createDecorator(decor);
 
-                $.jedi('click', this.decorator);
+                $.jedi('click', decorator);
 
                 this.$lis.bind('click', evt1);
                 this.$lis.bind('change', evt2);
@@ -902,15 +1281,16 @@
             });
 
             QUnit.test('.unbind(eventType, handler(eventObject))', function () {
-                var evt1 = createSpy();
-                var evt2 = createSpy();
-                var evt3 = createSpy();
-                var evt4 = createSpy();
-                var evt5 = createSpy();
-                var evt6 = createSpy();
-                var decor = this.decor;
+                var evt1 = createSpy('evt1');
+                var evt2 = createSpy('evt2');
+                var evt3 = createSpy('evt3');
+                var evt4 = createSpy('evt4');
+                var evt5 = createSpy('evt5');
+                var evt6 = createSpy('evt6');
+                var decor = createSpy('decor1');
+                var decorator = createDecorator(decor);
 
-                $.jedi('click', this.decorator);
+                $.jedi('click', decorator);
 
                 this.$lis
                     .bind('click', evt1)
@@ -1013,11 +1393,12 @@
             });
 
             QUnit.test('.unbind(eventType, false)', function () {
-                var evt1 = createSpy();
-                var evt2 = createSpy();
-                var decor = this.decor;
+                var evt1 = createSpy('evt1');
+                var evt2 = createSpy('evt2');
+                var decor = createSpy('decor1');
+                var decorator = createDecorator(decor);
 
-                $.jedi('click', this.decorator);
+                $.jedi('click', decorator);
 
                 this.$ul.bind('click', evt2);
                 this.$lis.bind('click', evt1);
@@ -1060,10 +1441,11 @@
             });
 
             QUnit.test('.unbind(event)', function () {
-                var evt1 = createSpy();
-                var decor = this.decor;
+                var evt1 = createSpy('evt1');
+                var decor = createSpy('decor1');
+                var decorator = createDecorator(decor);
 
-                $.jedi('click', this.decorator);
+                $.jedi('click', decorator);
 
                 this.$lis.bind('click', evt1);
 
@@ -1087,14 +1469,15 @@
 
             QUnit.test('.unbind(eventType) namespaced eventType', function () {
                 // verify that an eventType.namespace and .namespace unbind
-                var evt1 = createSpy();
-                var evt2 = createSpy();
-                var evt3 = createSpy();
-                var evt4 = createSpy();
-                var evt5 = createSpy();
-                var decor = this.decor;
+                var evt1 = createSpy('evt1');
+                var evt2 = createSpy('evt2');
+                var evt3 = createSpy('evt3');
+                var evt4 = createSpy('evt4');
+                var evt5 = createSpy('evt5');
+                var decor = createSpy('decor1');
+                var decorator = createDecorator(decor);
 
-                $.jedi('click', this.decorator);
+                $.jedi('click', decorator);
 
                 this.$lis
                     .bind('click', evt1)
@@ -1130,6 +1513,57 @@
                 );
             });
 
+            QUnit.test('.unbind removes jedi data from nodes', function () {
+                var sp = createSpies(9, 'evt');
+                var dsp = createSpies(3, 'decor');
+                var decorators = createDecorators(dsp);
+
+                this.$lis
+                    .bind('click', sp[0])
+                    .bind('change', sp[1])
+                    .bind('wizz.a.b', sp[2])
+                    .bind('foo.a bar.b', sp[3]);
+
+                $.jedi('click change', decorators[0]);
+                $.jedi('wizz', decorators[1]);
+                $.jedi('click foo bar', decorators[2]);
+
+                this.$lis
+                    .bind('click', sp[4])
+                    .bind('change', sp[5])
+                    .bind('wizz.a.b', sp[6])
+                    .bind('foo.a bar.b', sp[7])
+                    .bind('click.a', sp[8]);
+
+                var actual = this.$li0.data('js-jedi');
+                var expected = $.extend(true, [], this.$li0.data('js-jedi'));
+                var originalCopy = $.extend(true, [], this.$li0.data('js-jedi'));
+
+                // sanity check
+                QUnit.deepEqual(actual, expected);
+
+                this.$li0.unbind('wizz.a', sp[6]);
+
+                expected.splice(2, 1);
+
+                QUnit.deepEqual(actual, expected);
+
+                this.$li0.unbind('click');
+
+                expected.splice(0, 1);
+                expected.splice(3, 1);
+
+                QUnit.deepEqual(actual, expected);
+
+                this.$li0.unbind();
+
+                QUnit.deepEqual(actual, []);
+
+                // li1 should be untouched; should have the same lookup data
+                // as li0 initially did
+                QUnit.deepEqual(this.$li1.data('js-jedi'), originalCopy);
+            });
+
             /*
             QUnit.test('multiple events', function () {});
 
@@ -1144,33 +1578,94 @@
 
             if (jqVersion === '1.7') {
                 /*
-                QUnit.test('.one(events, selector, handler(eventObject))', function () {});
+                QUnit.test('.on(events, selector, handler(eventObject))', function () {});
 
-                QUnit.test('.one(events, data, handler(eventObject))', function () {});
+                QUnit.test('.on(events, data, handler(eventObject))', function () {});
 
-                QUnit.test('.one(events, selector, data, handler(eventObject))', function () {});
+                QUnit.test('.on(events, selector, data, handler(eventObject))', function () {});
 
-                QUnit.test('.one(event-maps)', function () {});
+                QUnit.test('.on(event-maps)', function () {});
 
-                QUnit.test('.one(event-maps, selector)', function () {});
+                QUnit.test('.on(event-maps, selector)', function () {});
 
-                QUnit.test('.one(event-maps, data)', function () {});
+                QUnit.test('.on(event-maps, data)', function () {});
 
-                QUnit.test('.one(event-maps, selector, data)', function () {});*/
+                QUnit.test('.on(event-maps, selector, data)', function () {});*/
             }
         };
         
-        tests.delegateEvents = function () {
+        tests.delegate = function ($, jqVersion) {
+            module('delegate', $, jqVersion);
+
+            QUnit.test('(selector, eventType, handler)', function () {
+                var sp = createSpies(3);
+                var dsp = createSpies(1, 'decor');
+                var decorators = createDecorators(dsp);
+
+                this.$lis
+                    .delegate('li', 'click', sp[0])
+                    .delegate('li', 'change', sp[1]);
+
+                $.jedi('click', decorators[0]);
+
+                this.$lis.delegate('li', 'click', sp[2]);
+
+                this.$li0.click();
+
+                verifyCallCountPairs(
+                    1, sp[0],
+                    0, sp[1],
+                    1, sp[2],
+                    1, dsp[0]
+                );
+
+                verifyCallOrder(sp[0], dsp[0], sp[2]);
+            });
+        };
+
+        tests.live = function ($, jqVersion) {
+            module('live', $, jqVersion);
+
+            QUnit.test('(events, handler)', function () {
+                var sp = createSpies(3);
+                var dsp = createSpies(1, 'decor');
+                var decorators = createDecorators(dsp);
+
+                this.$lis.find('li')
+                    .live('click', sp[0])
+                    .live('change', sp[1]);
+
+                $.jedi('click', decorators[0]);
+
+                this.$lis.find('li').live('click', sp[2]);
+
+                this.$li0.click();
+
+                verifyCallCountPairs(
+                    1, sp[0],
+                    0, sp[1],
+                    1, sp[2],
+                    1, dsp[0]
+                );
+
+                verifyCallOrder(sp[0], dsp[0], sp[2]);
+            });
+        };
+
+        /*tests.delegateEvents = function () {
         };
 
         tests.liveEvents = function () {
         };
 
         tests.onEvents = function () {
-        };
+        };*/
 
         $.each(jqVersions, function (jqVar, jqVersion) {
             var jq = window[jqVar];
+
+            jqEnvironments[jqVersion] = setupEnvironment(jq, jqVersion);
+            
             $.each(tests, function (name, test) {
                 test(jq, jqVersion);
             });
